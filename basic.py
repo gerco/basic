@@ -11,8 +11,12 @@ import os
 from dataclasses import dataclass
 from typing import List
 
-operators = ["+", "-", "/", "*", "=", "&"]
+operators = ["+", "-", "/", "*", "<", ">", "=", "&"]
+program   = []
+pc        = 0
+newpc     = 0
 variables = {}
+labels    = {}
 
 class Lookahead():
      "Wrap iterator with lookahead to both peek and test exhausted"
@@ -91,6 +95,10 @@ class Variable(Expression):
     name: str
     def eval(self):
         return variables[self.name]
+    
+@dataclass
+class Label(Node):
+    name: str
 
 @dataclass
 class If(Statement):
@@ -124,6 +132,18 @@ class Let(Statement):
     def exec(self):
         variables[self.varname] = self.expr.eval()
 
+@dataclass
+class Goto(Statement):
+    label: str
+    
+    def exec(self):
+        global newpc
+        
+        if self.label in labels:
+            newpc = program.index(labels[self.label])
+        else:
+            raise Exception("Label %s not found" % self.label)
+
 class Operator(Node):
     pass
 
@@ -143,6 +163,14 @@ class Minus(InfixOperator):
 class Equals(InfixOperator):
     def eval(self):
         return self.l.eval() == self.r.eval()
+
+class GreaterThan(InfixOperator):
+    def eval(self):
+        return self.l.eval() > self.r.eval()
+    
+class LessThan(InfixOperator):
+    def eval(self):
+        return self.l.eval() < self.r.eval()
     
 class Concat(InfixOperator):
     def eval(self):
@@ -220,6 +248,8 @@ def convToken(token):
         return String(token.value)
     elif token.value.isnumeric():
         return Number(token.value)
+    elif token.value.endswith(":"):
+        return Label(token.value[:-1])
     else:
         return Variable(token.value)
 
@@ -240,14 +270,12 @@ def parseExpression(it):
     r = parseExpression(it)
 
     # Now create the operation object
-    if op == "=":
-        return Equals(l, r)
-    elif op == "+":
-        return Plus(l, r)
-    elif op == "-":
-        return Minus(l, r)
-    elif op == "&":
-        return Concat(l, r)
+    if op == "=":   return Equals(l, r)
+    elif op == "+": return Plus(l, r)
+    elif op == "-": return Minus(l, r)
+    elif op == "&": return Concat(l, r)
+    elif op == "<": return LessThan(l, r)
+    elif op == ">": return GreaterThan(l, r)
     else:
         raise Exception("Unknown operation %s" % (op))
 
@@ -257,12 +285,18 @@ def parseStatement(it):
     elif token == "PRINT":  return parsePrint(it)
     elif token == "FOR":    return parseFor(it)
     elif token == "LET":    return parseLet(it)
+    elif token == "GOTO":   return Goto(it.__next__().value)
     
-    # Special case of let statement without let
     node = convToken(token)
     if isinstance(node, Variable) and it.peek == "=":
+        # Special case of let statement without let
         it.__next__() # Skip over the equals sign
         return Let(node.name, parseExpression(it))
+    elif isinstance(node, Label):
+        # Label points to the next statement
+        nextNode = parseStatement(it)
+        labels[node.name] = nextNode
+        return nextNode
     
     raise UnexpectedError("statement", token)
     
@@ -333,7 +367,7 @@ def parseLet(it):
     return Let(varname, expr)
 
 def parse(tokens):
-    """Turn a list of tokens into an AST"""
+    """Turn a list of tokens into an ASL"""
 
     # A program is an ordered list of statements
     program = []
@@ -355,6 +389,8 @@ def parse(tokens):
     return program
 
 def main(argc, argv):
+    global program, pc, newpc
+    
     tokens = tokenize(argv[1])
     if argc == 3 and argv[2] == "--debug":
         for t in tokens:
@@ -362,8 +398,15 @@ def main(argc, argv):
             
     try:
         program = parse(tokens)
-        for stmt in program:
-            stmt.exec()
+        if argc == 3 and argv[2] == "--asl":
+            print(program)
+            print(labels)
+        
+        pc = 0
+        while pc < len(program):
+            newpc = pc + 1
+            program[pc].exec()
+            pc = newpc
     except UnexpectedError as e:
         print(e)
         

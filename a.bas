@@ -20,4 +20,12 @@ FOR i=1 TO 10
     print "  The total is " & x
 END
 
+y=0
+loop2:
+    y=y+1
+    print "    The value of y is " & y
+    if y < 10 then 
+        goto loop2 
+    end
+
 PRINT "End of program"
