@@ -8,6 +8,7 @@ Documentation, License etc.
 
 import sys
 import os
+import uuid
 from dataclasses import dataclass
 from typing import List
 
@@ -66,13 +67,6 @@ class Node:
 class Statement(Node):
     pass
 
-@dataclass
-class Statements(Node):
-    statements: List[Statement]
-    def exec(self):
-        for stmt in self.statements:
-            stmt.exec()
-
 class Expression(Node):
     pass
 
@@ -83,47 +77,29 @@ class Number(Expression):
         self.value = float(value)
     def eval(self):
         return self.value;
+    def __str__(self):
+        return str(self.value)
     
 @dataclass
 class String(Expression):
     value: str
     def eval(self):
         return self.value
+    def __str__(self):
+        return "\"%s\"" % self.value    
 
 @dataclass
 class Variable(Expression):
     name: str
     def eval(self):
         return variables[self.name]
+    def __str__(self):
+        return self.name
     
 @dataclass
 class Label(Node):
     name: str
 
-@dataclass
-class If(Statement):
-    expr: Expression
-    thenDo: Statement
-    elseDo: Statement
-    def exec(self):
-        if(self.expr.eval()):
-            self.thenDo.exec()
-        else:
-            self.elseDo.exec()
-
-@dataclass            
-class For(Statement):
-    varname: str
-    initialValue: Expression
-    finalValue: Expression
-    body: Statements
-    
-    def exec(self):
-        variables[self.varname] = self.initialValue.eval()
-        while variables[self.varname] <= self.finalValue.eval():
-            self.body.exec()
-            variables[self.varname] += 1
-            
 @dataclass
 class Let(Statement):
     varname: str
@@ -131,6 +107,9 @@ class Let(Statement):
     
     def exec(self):
         variables[self.varname] = self.expr.eval()
+        
+    def __str__(self):
+        return "LET %s = %s" % (self.varname, self.expr)
 
 @dataclass
 class Goto(Statement):
@@ -143,6 +122,32 @@ class Goto(Statement):
             newpc = program.index(labels[self.label])
         else:
             raise Exception("Label %s not found" % self.label)
+        
+    def __str__(self):
+        return "GOTO %s" % self.label
+        
+@dataclass
+class If(Statement):
+    expr: Expression()
+    ifTrue: Goto
+    ifFalse: Goto
+    
+    def exec(self):
+        if self.expr.eval() == True:
+            if self.ifTrue != None:
+                self.ifTrue.exec()
+        else:
+            if self.ifFalse != None:
+                self.ifFalse.exec()
+                
+    def __str__(self):
+        return "IF %s THEN\n%s\nELSE\n%s\nEND" % (self.expr, self.ifTrue, self.ifFalse)
+                
+class Nop(Statement):
+    def exec(self):
+        pass
+    def __str__(self):
+        return "NOP";
 
 class Operator(Node):
     pass
@@ -151,28 +156,36 @@ class Operator(Node):
 class InfixOperator(Operator):
     l: Expression
     r: Expression
+    def __str__(self):
+        return "%s %s %s" % (self.l, self.o, self.r)
 
 class Plus(InfixOperator):
+    o = "+"
     def eval(self):
         return (self.l.eval()) + self.r.eval()
     
 class Minus(InfixOperator):
+    o = "-"
     def eval(self):
         return self.l.eval() - self.r.eval()
 
 class Equals(InfixOperator):
+    o = "="
     def eval(self):
         return self.l.eval() == self.r.eval()
 
 class GreaterThan(InfixOperator):
+    o = ">"
     def eval(self):
         return self.l.eval() > self.r.eval()
     
 class LessThan(InfixOperator):
+    o = "<"
     def eval(self):
         return self.l.eval() < self.r.eval()
     
 class Concat(InfixOperator):
+    o = "&"
     def eval(self):
         return str(self.l.eval()) + str(self.r.eval())
 
@@ -181,6 +194,8 @@ class Print(Statement):
     expr: Expression
     def exec(self):
         print(self.expr.eval());
+    def __str__(self):
+        return "PRINT %s" % self.expr
 
 @dataclass
 class UnexpectedError(Exception):
@@ -255,7 +270,6 @@ def convToken(token):
 
 def parseExpression(it):
     token = it.__next__()
-
         
     l = convToken(token)
         
@@ -282,25 +296,27 @@ def parseExpression(it):
 def parseStatement(it):
     token = it.__next__()
     if   token == "IF":     return parseIf(it)
-    elif token == "PRINT":  return parsePrint(it)
+    elif token == "PRINT":  return [parsePrint(it)]
     elif token == "FOR":    return parseFor(it)
-    elif token == "LET":    return parseLet(it)
-    elif token == "GOTO":   return Goto(it.__next__().value)
+    elif token == "LET":    return [parseLet(it)]
+    elif token == "GOTO":   return [Goto(it.__next__().value)]
     
     node = convToken(token)
     if isinstance(node, Variable) and it.peek == "=":
         # Special case of let statement without let
         it.__next__() # Skip over the equals sign
-        return Let(node.name, parseExpression(it))
+        return [Let(node.name, parseExpression(it))]
     elif isinstance(node, Label):
         # Label points to the next statement
-        nextNode = parseStatement(it)
-        labels[node.name] = nextNode
-        return nextNode
+        next = parseStatement(it)
+        labels[node.name] = next[0]
+        return next
     
     raise UnexpectedError("statement", token)
     
 def parseFor(it):
+    code = []
+    
     varname = it.__next__().value
     
     eq = it.__next__()
@@ -308,6 +324,7 @@ def parseFor(it):
         raise UnexpectedError("=", eq)
 
     initialValue = parseExpression(it)
+    code.append(Let(varname, initialValue))
     
     to = it.__next__()
     if to != "TO":
@@ -315,16 +332,20 @@ def parseFor(it):
     
     finalValue = parseExpression(it)
     
-    body = []
     while it.peek != "END":
-        body.append(parseStatement(it))
-    body = Statements(body)
+        for stmt in parseStatement(it):
+            code.append(stmt)
+
+    code.append(Let(varname, Plus(Variable(varname), Number(1))));
+    bodyLabel = str(uuid.uuid1())
+    labels[bodyLabel] = code[1]
+    code.append(If(LessThan(Variable(varname), finalValue), Goto(bodyLabel), None))
     
     end = it.__next__()
     if end != "END":
         raise UnexpectedError("END", end)
     
-    return For(varname, initialValue, finalValue, body)
+    return code
     
 def parsePrint(it):
     return Print(parseExpression(it))
@@ -338,21 +359,39 @@ def parseIf(it):
 
     thenDo = []
     while it.peek != "ELSE" and it.peek != "END":
-        thenDo.append(parseStatement(it))
-    thenDo = Statements(thenDo)
+        for stmt in parseStatement(it):
+            thenDo.append(stmt)
+    thenLabel = str(uuid.uuid1())
+    labels[thenLabel] = thenDo[0]
 
     elseDo = []
     if it.peek == "ELSE":
         it.__next__()
         while it.peek != "END":
-            elseDo.append(parseStatement(it))
-    elseDo = Statements(elseDo)
+            for stmt in parseStatement(it):
+                elseDo.append(stmt)
     
     if it.peek != "END":
         raise UnexpectedError("END", it.__next__())
     it.__next__()
     
-    return If(expr, thenDo, elseDo)
+    nop = Nop()
+    nopLabel = str(uuid.uuid1())
+    labels[nopLabel] = nop
+    
+    code = []
+    
+    # Generate the IF statement, then ELSE code that we jump over in case 
+    # the expression is true
+    code.append(If(expr, Goto(thenLabel), None))
+    for stmt in elseDo:
+        code.append(stmt)
+    code.append(Goto(nopLabel))
+    for stmt in thenDo:
+        code.append(stmt)
+    code.append(nop)
+    
+    return code
 
 def parseLet(it):
     varname = it.__next__().value
@@ -376,8 +415,8 @@ def parse(tokens):
 
     while True:
         try:
-            stmt = parseStatement(it)
-            program.append(stmt)
+            for stmt in parseStatement(it):
+                program.append(stmt)
         except StopIteration:
             break
         except UnexpectedError:
@@ -399,7 +438,8 @@ def main(argc, argv):
     try:
         program = parse(tokens)
         if argc == 3 and argv[2] == "--asl":
-            print(program)
+            for stmt in program:
+                print(stmt)
             print(labels)
         
         pc = 0
