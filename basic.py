@@ -8,7 +8,6 @@ Documentation, License etc.
 
 import sys
 import os
-import uuid
 from dataclasses import dataclass
 from typing import List
 
@@ -47,6 +46,7 @@ class Token:
     line: int
     pos: int
     value: str
+    
     def __eq__(self, other):
         if isinstance(other, str):
             return self.value.lower() == other.lower()
@@ -60,6 +60,9 @@ class Token:
 class StringToken(Token):
     def __eq__(self, other):
         return False;
+    
+    def ___str__(self):
+        return "String(%s)" % self.value
 
 class Node:
     pass
@@ -111,20 +114,29 @@ class Let(Statement):
     def __str__(self):
         return "LET %s = %s" % (self.varname, self.expr)
 
-@dataclass
 class Goto(Statement):
     label: str
+    pc: str
+    
+    def __init__(self, label=None, pc=None):
+        if label != None: self.label = label
+        if pc    != None: self.pc    = pc
+        if label is None and pc is None:
+            raise Exception("Invalid Goto: no destination")
     
     def exec(self):
         global newpc
-        
-        if self.label in labels:
-            newpc = program.index(labels[self.label])
-        else:
-            raise Exception("Label %s not found" % self.label)
+
+        if not(hasattr(self, 'pc')):
+            try:
+                self.pc = labels[self.label]
+            except KeyError:
+                raise Exception("Label %s not found" % self.label)
+                
+        newpc = self.pc
         
     def __str__(self):
-        return "GOTO %s" % self.label
+        return "GOTO %s" % (self.label if hasattr(self, 'label') else self.pc)
         
 @dataclass
 class If(Statement):
@@ -141,7 +153,9 @@ class If(Statement):
                 self.ifFalse.exec()
                 
     def __str__(self):
-        return "IF %s THEN\n%s\nELSE\n%s\nEND" % (self.expr, self.ifTrue, self.ifFalse)
+        return "IF %s %s %s" % (self.expr, 
+                                "THEN %s" % self.ifTrue  if self.ifTrue  != None else "", 
+                                "ELSE %s" % self.ifFalse if self.ifFalse != None else "")
                 
 class Nop(Statement):
     def exec(self):
@@ -242,21 +256,6 @@ def tokenize(filename):
             else:
                 token += c
                 #print("line %d pos %d token=%s" % (line, pos, token))
-            
-            
-#    return [
-#        "PRINT", "Start of program",
-#        "IF", "1", "=", "1", "THEN", 
-#            "PRINT", "  " , "&", "1", "+", "2", "+", "2", 
-#            "PRINT", "  " , "&", "3", "+", "4", "+", "5", 
-#            "IF", "1", "=", "1", "THEN", 
-#                "PRINT", "    One equals One",
-#            "ENDIF",
-#        "ELSE", 
-#            "PRINT", "Whu?", 
-#        "ENDIF",
-#        "PRINT", "End of program"
-#    ]
 
 def convToken(token):
     if isinstance(token, StringToken):
@@ -283,40 +282,35 @@ def parseExpression(it):
     # are evaluated strictly right-to-left
     r = parseExpression(it)
 
-    # Now create the operation object
-    if op == "=":   return Equals(l, r)
+    # Now create the operator object
+    if   op == "=": return Equals(l, r)
     elif op == "+": return Plus(l, r)
     elif op == "-": return Minus(l, r)
     elif op == "&": return Concat(l, r)
     elif op == "<": return LessThan(l, r)
     elif op == ">": return GreaterThan(l, r)
-    else:
-        raise Exception("Unknown operation %s" % (op))
+    else: raise Exception("Unknown operator %s" % (op))
 
-def parseStatement(it):
+def parseStatement(it, program):
     token = it.__next__()
-    if   token == "IF":     return parseIf(it)
-    elif token == "PRINT":  return [parsePrint(it)]
-    elif token == "FOR":    return parseFor(it)
-    elif token == "LET":    return [parseLet(it)]
-    elif token == "GOTO":   return [Goto(it.__next__().value)]
+    if   token == "IF":     parseIf(   it, program)
+    elif token == "PRINT":  parsePrint(it, program)
+    elif token == "FOR":    parseFor(  it, program)
+    elif token == "LET":    parseLet(  it, program)
+    elif token == "GOTO":   program.append(Goto(label=it.__next__().value))
+    else:
+        node = convToken(token)
+        if isinstance(node, Variable) and it.peek == "=":
+            # Special case of let statement without let
+            it.__next__() # Skip over the equals sign
+            program.append(Let(node.name, parseExpression(it)))
+        elif isinstance(node, Label):
+            # Label points to the next statement
+            labels[node.name] = len(program)
+        else:
+            raise UnexpectedError("statement", token)
     
-    node = convToken(token)
-    if isinstance(node, Variable) and it.peek == "=":
-        # Special case of let statement without let
-        it.__next__() # Skip over the equals sign
-        return [Let(node.name, parseExpression(it))]
-    elif isinstance(node, Label):
-        # Label points to the next statement
-        next = parseStatement(it)
-        labels[node.name] = next[0]
-        return next
-    
-    raise UnexpectedError("statement", token)
-    
-def parseFor(it):
-    code = []
-    
+def parseFor(it, program):
     varname = it.__next__().value
     
     eq = it.__next__()
@@ -324,7 +318,7 @@ def parseFor(it):
         raise UnexpectedError("=", eq)
 
     initialValue = parseExpression(it)
-    code.append(Let(varname, initialValue))
+    program.append(Let(varname, initialValue))
     
     to = it.__next__()
     if to != "TO":
@@ -332,68 +326,61 @@ def parseFor(it):
     
     finalValue = parseExpression(it)
     
+    startOfLoopPC = len(program)
+    
     while it.peek != "END":
-        for stmt in parseStatement(it):
-            code.append(stmt)
+        parseStatement(it, program)
 
-    code.append(Let(varname, Plus(Variable(varname), Number(1))));
-    bodyLabel = str(uuid.uuid1())
-    labels[bodyLabel] = code[1]
-    code.append(If(LessThan(Variable(varname), finalValue), Goto(bodyLabel), None))
+    program.append(Let(varname, Plus(Variable(varname), Number(1))));
+    program.append(If(LessThan(Variable(varname), finalValue), Goto(pc=startOfLoopPC), None))
     
     end = it.__next__()
     if end != "END":
         raise UnexpectedError("END", end)
     
-    return code
-    
-def parsePrint(it):
-    return Print(parseExpression(it))
+def parsePrint(it, program):
+    program.append(Print(parseExpression(it)))
 
-def parseIf(it):
+def parseIf(it, program):
     expr = parseExpression(it)
 
+    # Read and skip the THEN keyword
     if it.peek != "THEN":
         raise UnexpectedError("THEN", it.__next__())
     it.__next__()
+    
+    # Reserve some space for the If statement
+    ifPC = len(program)
+    program.append(None)
 
-    thenDo = []
+    # Parse and generate code for the THEN block
+    thenPC = len(program)
     while it.peek != "ELSE" and it.peek != "END":
-        for stmt in parseStatement(it):
-            thenDo.append(stmt)
-    thenLabel = str(uuid.uuid1())
-    labels[thenLabel] = thenDo[0]
+        parseStatement(it, program)
+        
+    # At the end of the THEN code, we have to jump 
+    # over the ELSE block. We need another GOTO here
+    # but we don't know the address yet
+    jmpOverElsePC = len(program)
+    program.append(None)
 
-    elseDo = []
+    # Generate code for the ELSE block, if any
+    elsePC = None
     if it.peek == "ELSE":
+        elsePC = len(program)
         it.__next__()
         while it.peek != "END":
-            for stmt in parseStatement(it):
-                elseDo.append(stmt)
+            parseStatement(it, program)
     
+    # Read and skip end END keyword
     if it.peek != "END":
         raise UnexpectedError("END", it.__next__())
     it.__next__()
     
-    nop = Nop()
-    nopLabel = str(uuid.uuid1())
-    labels[nopLabel] = nop
-    
-    code = []
-    
-    # Generate the IF statement, then ELSE code that we jump over in case 
-    # the expression is true
-    code.append(If(expr, Goto(thenLabel), None))
-    for stmt in elseDo:
-        code.append(stmt)
-    code.append(Goto(nopLabel))
-    for stmt in thenDo:
-        code.append(stmt)
-    code.append(nop)
-    
-    return code
+    program[ifPC]=If(expr, Goto(pc=thenPC), Goto(pc=elsePC) if elsePC != None else Goto(pc=len(program)))
+    program[jmpOverElsePC] = Goto(len(program))
 
-def parseLet(it):
+def parseLet(it, program):
     varname = it.__next__().value
     
     # Skip the equals sign
@@ -403,7 +390,7 @@ def parseLet(it):
     
     expr = parseExpression(it)
     
-    return Let(varname, expr)
+    program.append(Let(varname, expr))
 
 def parse(tokens):
     """Turn a list of tokens into an ASL"""
@@ -415,8 +402,7 @@ def parse(tokens):
 
     while True:
         try:
-            for stmt in parseStatement(it):
-                program.append(stmt)
+            parseStatement(it, program)
         except StopIteration:
             break
         except UnexpectedError:
@@ -435,20 +421,18 @@ def main(argc, argv):
         for t in tokens:
             print("[%s]" % t)
             
-    try:
-        program = parse(tokens)
-        if argc == 3 and argv[2] == "--asl":
-            for stmt in program:
-                print(stmt)
-            print(labels)
-        
-        pc = 0
-        while pc < len(program):
-            newpc = pc + 1
-            program[pc].exec()
-            pc = newpc
-    except UnexpectedError as e:
-        print(e)
+    program = parse(tokens)
+    if argc == 3 and argv[2] == "--asl":
+        for i, stmt in enumerate(program):
+            print("%3d   %s" % (i, stmt))
+        print(labels)
+        return
+    
+    pc = 0
+    while pc < len(program):
+        newpc = pc + 1
+        program[pc].exec()
+        pc = newpc
         
 if __name__ == '__main__':
     main(len(sys.argv), sys.argv)
