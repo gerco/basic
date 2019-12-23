@@ -54,7 +54,7 @@ class Token:
             return False
     
     def __str__(self):
-        return "'%s' at line %d, pos %d" % (self.value, self.line, self.pos)
+        return "%s at line %d, pos %d" % (repr(self.value), self.line, self.pos)
 
 @dataclass
 class StringToken(Token):
@@ -63,6 +63,10 @@ class StringToken(Token):
     
     def ___str__(self):
         return "String(%s)" % self.value
+    
+@dataclass
+class NewLineToken(Token):
+    pass
 
 class Node:
     pass
@@ -223,7 +227,7 @@ def readString(line, pos, f):
     value = ""
     while True:
         c = f.read(1)
-        if c == "\"": return StringToken(line, pos, value)
+        if c == "\"": return (StringToken(line, pos, value), len(value)+1)
         value += c
 
 def tokenize(filename):
@@ -242,6 +246,7 @@ def tokenize(filename):
                 if len(token) > 0:
                     yield Token(line, pos-len(token), token)
                 if c == '\n':
+                    yield NewLineToken(line, pos, c)
                     line += 1
                     pos = 0
                 token = ""
@@ -251,7 +256,9 @@ def tokenize(filename):
                 yield Token(line, pos, c)
                 token = ""
             elif c == "\"":
-                yield readString(line, pos, f)
+                token, length = readString(line, pos, f)
+                pos += length
+                yield token
                 token = ""
             else:
                 token += c
@@ -297,7 +304,9 @@ def parseStatement(it, program):
     elif token == "PRINT":  parsePrint(it, program)
     elif token == "FOR":    parseFor(  it, program)
     elif token == "LET":    parseLet(  it, program)
+    elif token == "REM":    parseRem(  it)
     elif token == "GOTO":   program.append(Goto(label=it.__next__().value))
+    elif isinstance(token, NewLineToken): pass
     else:
         node = convToken(token)
         if isinstance(node, Variable) and it.peek == "=":
@@ -309,7 +318,11 @@ def parseStatement(it, program):
             labels[node.name] = len(program)
         else:
             raise UnexpectedError("statement", token)
-    
+
+def parseRem(it):
+    while not(isinstance(it.peek, NewLineToken)):
+        next(it)
+
 def parseFor(it, program):
     varname = it.__next__().value
     
@@ -328,15 +341,19 @@ def parseFor(it, program):
     
     startOfLoopPC = len(program)
     
-    while it.peek != "END":
+    while it.peek != "NEXT":
         parseStatement(it, program)
 
     program.append(Let(varname, Plus(Variable(varname), Number(1))));
     program.append(If(LessThan(Variable(varname), finalValue), Goto(pc=startOfLoopPC), None))
     
     end = it.__next__()
-    if end != "END":
-        raise UnexpectedError("END", end)
+    if end != "NEXT":
+        raise UnexpectedError("NEXT", end)
+
+    # The variable name is allowed to follow NEXT
+    if it.peek == varname:
+        it.__next__()
     
 def parsePrint(it, program):
     program.append(Print(parseExpression(it)))
@@ -361,12 +378,13 @@ def parseIf(it, program):
     # At the end of the THEN code, we have to jump 
     # over the ELSE block. We need another GOTO here
     # but we don't know the address yet
-    jmpOverElsePC = len(program)
-    program.append(None)
+    jmpOverElsePC = None
 
     # Generate code for the ELSE block, if any
     elsePC = None
     if it.peek == "ELSE":
+        jmpOverElsePC = len(program)
+        program.append(None)
         elsePC = len(program)
         it.__next__()
         while it.peek != "END":
@@ -378,7 +396,8 @@ def parseIf(it, program):
     it.__next__()
     
     program[ifPC]=If(expr, Goto(pc=thenPC), Goto(pc=elsePC) if elsePC != None else Goto(pc=len(program)))
-    program[jmpOverElsePC] = Goto(len(program))
+    if jmpOverElsePC != None:
+        program[jmpOverElsePC] = Goto(pc=len(program))
 
 def parseLet(it, program):
     varname = it.__next__().value
